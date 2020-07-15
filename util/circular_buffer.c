@@ -287,6 +287,35 @@ static int32_t cb_operation(struct circular_buffer *desc,
 	return SUCCESS;
 }
 
+int32_t cb_prepare_async_write(struct circular_buffer *desc,
+			       uint32_t size_to_write,
+			       void **write_buff,
+			       uint32_t *size_avilable)
+{
+	return cb_prepare_async_operation(desc, size_to_write, write_buff,
+					  size_avilable, 0);
+}
+
+int32_t cb_prepare_async_read(struct circular_buffer *desc,
+			      uint32_t size_to_read,
+			      void **read_buff,
+			      uint32_t *size_avilable)
+{
+	return cb_prepare_async_operation(desc, size_to_read, read_buff,
+					  size_avilable, 1);
+}
+
+int32_t cb_end_async_write(struct circular_buffer *desc)
+{
+	return cb_end_async_operation(desc, 0);
+}
+
+int32_t cb_end_async_read(struct circular_buffer *desc)
+{
+
+	return cb_end_async_operation(desc, 1);
+}
+
 /**
  * @brief Write data to the buffer
  * @param desc - Circular buffer reference
