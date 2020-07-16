@@ -106,36 +106,16 @@ static const struct cmd_desc g_map[] = {
 	{{PUI8("+PING"), 5}, AT_SET_OP}
 };
 
-/* Structure storing a circular buffer for a connection */
-struct at_circular_buff {
-	/* Size of the buffer */
-	uint32_t	size;
-	/* Address to the buffer */
-	uint8_t		*buff;
-	/* Read index */
-	uint32_t	ri;
-	/* Write index */
-	uint32_t	wi;
-	/* Number of current elements in buffer */
-	uint32_t	count;
-	/* Last read len */
-	uint32_t	last_len;
-	/* Set if overflow */
-	bool		is_overflow;
-	/* Used for polling in blocking read */
-	bool		new_data;
-};
-
 /* Structure storing a connection status */
 struct connection_desc {
 	/* Connection buffer */
-	volatile struct at_circular_buff	cbuff;
+	struct circular_buffer	*cbuff;
 	/* Pending bytes for reading */
-	uint32_t				to_read;
+	uint32_t		to_read;
 	/* True if connection established */
-	bool					active;
+	bool			active;
 	/* Type of connection */
-	enum socket_type			type;
+	enum socket_type	type;
 };
 
 /* Structure storing the status of the parser */
@@ -204,11 +184,40 @@ struct at_desc {
 	}			ipd_stat;
 	/* Variable where current message length is built */
 	uint32_t		ipd_len;
+	/* Will be called when a new connection is created or closed */
+	void			(*connection_callback)(void *ctx, enum at_event,
+			uint32_t conn_id, struct circular_buffer **cb);
+	/* Context that will be passed to the callback */
+	void			*callback_ctx;
 };
 
 /******************************************************************************/
 /************************ Functions Definitions *******************************/
 /******************************************************************************/
+
+static void dispatch_event(struct at_desc *desc, enum at_event event)
+{
+	struct connection_desc *conn;
+
+	conn = &desc->conn[desc->current_conn];
+
+	if (event == AT_NEW_CONNECTION) {
+		if (!conn->active) {
+			desc->connection_callback(desc->callback_ctx, event,
+						  desc->current_conn,
+						  &conn->cbuff);
+			if (conn->cbuff)
+				conn->active = true;
+			//else todo close connection
+		}
+	} else if (event == AT_CLOSED_CONNECTION) {
+		conn->active = false;
+		conn->cbuff = NULL;
+		desc->connection_callback(desc->callback_ctx, event,
+					  desc->current_conn,
+					  NULL);
+	}
+}
 
 static void set_params(struct at_buff *dest, uint8_t *fmt, ...);
 
@@ -231,8 +240,9 @@ static inline bool match_message(const struct at_buff *msg, uint8_t *idx,
 	return false;
 }
 
-/* Check if a +IPD command have been received and updates the desc */
-static inline bool is_payload_message(struct at_desc *desc, uint8_t ch)
+/* Check if new command message have been sent and set in to_read the size
+ * of the data */
+static inline bool is_connection_message(struct at_desc *desc, uint8_t ch)
 {
 	static const struct at_buff	at_ipd = {PUI8("\r\n+IPD,"), 7};
 	/* max_ch_search = at_ipd.len + sizeof("0,1024") */
@@ -268,7 +278,7 @@ static inline bool is_payload_message(struct at_desc *desc, uint8_t ch)
 	case READING_LEN:
 		if (ch < '0' || ch > '9') {
 			if (ch == ':' && desc->ipd_len > 0) {
-				desc->conn[desc->current_conn ].to_read =
+				desc->conn[desc->current_conn].to_read =
 					desc->ipd_len;
 				desc->result.len -= desc->ipd_idx;
 				ret = true;
@@ -317,7 +327,8 @@ static inline int32_t check_conn_id(struct at_desc *desc, struct at_buff *msg,
 		}
 	}
 	if (id >= 0 && id < 4) {//Maximum of 4 connections
-		desc->conn[id].active = false;
+		desc->current_conn = id;
+		dispatch_event(desc, AT_CLOSED_CONNECTION);
 	} else {//Not id
 		desc->async_idx[msg_idx] = 0;
 		return false;
@@ -344,7 +355,7 @@ static bool is_async_messages(struct at_desc *desc, uint8_t ch)
 
 	switch (i) {
 	case 0: //Match CLOSED\r\n
-		if (check_conn_id(desc, &async_msgs[i], i))
+		if (check_conn_id(desc, (struct at_buff *)&async_msgs[i], i))
 			return false;
 		break;
 	case 1: //WIFI DISCONNECT\r\n
@@ -364,47 +375,47 @@ static bool is_async_messages(struct at_desc *desc, uint8_t ch)
 }
 
 /* Update the buffer descriptor when a read transaction ended */
-static inline void end_conn_read(volatile struct at_circular_buff *cbuff)
+static inline void end_conn_read(struct at_desc *desc)
 {
-	cbuff->wi += cbuff->last_len;
-	if (cbuff->wi == cbuff->size)
-		cbuff->wi = 0; //Move wi at the begining of buff
-	if (cbuff->count + cbuff->last_len > cbuff->size) {
-		cbuff->is_overflow = true; //Set overflow
-		cbuff->count = cbuff->size;
-		cbuff->ri = cbuff->wi;
-	} else {
-		cbuff->count += cbuff->last_len;
-	}
-	cbuff->new_data = true;
+	struct connection_desc	*conn;
+
+	conn = &desc->conn[desc->current_conn];
+
+	cb_end_async_write(conn->cbuff);
 }
 
 /* Start new read operation. If the read buffer is nul, aux_buff will be used */
-static inline void start_conn_read(struct connection_desc *conn,
-				   struct uart_desc *uart_desc,
-				   uint8_t *aux_buff)
+static inline void start_conn_read(struct at_desc *desc)
 {
-	uint32_t				len;
-	volatile struct at_circular_buff	*cbuff = &(conn->cbuff);
+	struct connection_desc	*conn;
+	uint8_t			*buff;
+	uint32_t		available_len;
+	uint32_t		ret;
 
-	if (!cbuff->buff || !cbuff->size) {
-		/* Read new data in aux_buff */
-		uart_read_nonblocking(uart_desc, aux_buff, 1);
-		conn->to_read -= 1;
-		return ;
-	}
+	conn = &desc->conn[desc->current_conn];
 
-	len = min(cbuff->size - cbuff->wi, conn->to_read);
-	uart_read_nonblocking(uart_desc, cbuff->buff + cbuff->wi, len);
-	conn->to_read -= len;
-	cbuff->last_len = len;
+	if (!conn->cbuff)
+		goto dummy_read;
+
+	ret = cb_prepare_async_write(conn->cbuff, conn->to_read,
+				     (void **)&buff, &available_len);
+	if (IS_ERR_VALUE(ret))
+		goto dummy_read;
+
+	uart_read_nonblocking(desc->uart_desc, buff, available_len);
+	conn->to_read -= available_len;
+
+	return ;
+dummy_read:
+	/* Read new data in aux_buff */
+	uart_read_nonblocking(desc->uart_desc, &desc->read_ch, 1);
+	conn->to_read -= 1;
 }
 
 /* Handle the uart events */
 static void at_callback(struct at_desc *desc, uint32_t event, uint8_t *data)
 {
 	static const struct at_buff ready_msg = {PUI8("ready\r\n"), 7};
-	struct connection_desc	*conn;
 
 	switch (event) {
 	case READ_DONE:
@@ -416,11 +427,10 @@ static void at_callback(struct at_desc *desc, uint32_t event, uint8_t *data)
 			break;
 		case WAITING_SEND:
 		case READING_RESPONSES:
-			if (is_payload_message(desc, desc->read_ch)) {
+			if (is_connection_message(desc, desc->read_ch)) {
 				desc->callback_operation = READING_PAYLOAD;
-				conn = &desc->conn[desc->current_conn];
-				start_conn_read(conn, desc->uart_desc,
-						&desc->read_ch);
+				dispatch_event(desc, AT_NEW_CONNECTION);
+				start_conn_read(desc);
 				return ;
 			}
 
@@ -438,15 +448,13 @@ static void at_callback(struct at_desc *desc, uint32_t event, uint8_t *data)
 			break;
 		case READING_PAYLOAD:
 			/* Receiving payload from connection */
-			conn = &desc->conn[desc->current_conn];
-			end_conn_read(&conn->cbuff);
-			if (!conn->to_read) {
+			end_conn_read(desc);
+			if (!desc->conn[desc->current_conn].to_read) {
 				desc->callback_operation = READING_RESPONSES;
 				desc->current_conn = -1;
 				break;
 			} else {
-				start_conn_read(conn, desc->uart_desc,
-						&desc->read_ch);
+				start_conn_read(desc);
 				return ;
 			}
 			break;
@@ -856,7 +864,6 @@ int32_t at_run_cmd(struct at_desc *desc, enum at_cmd cmd, enum cmd_operation op,
 		desc->multiple_conections = param->in.conn_type;
 	if (cmd == AT_START_CONNECTION && op == AT_SET_OP) {
 		id = desc->multiple_conections ? param->in.connection.id : 0;
-		desc->conn[id].active = true;
 		desc->conn[id].type = param->in.connection.soket_type;
 	}
 
@@ -881,122 +888,6 @@ int32_t at_run_cmd(struct at_desc *desc, enum at_cmd cmd, enum cmd_operation op,
 }
 
 /**
- * @brief Submit a buffer used to store the data received from a connection.
- *
- * The application mustn't use this buffer and it should read from it using
- * \ref at_read_buffer .\n
- * The buffer must be submitted before a \ref AT_START_CONNECTION is done,
- * otherwise data received from that connection will be lost.\n
- * The buffer is associated with a connection id so the same will be use even
- * if an other connection is started on the same id.
- * @param desc - AT parser reference
- * @param conn_id - Connection id for which the buffer will be submitted
- * @param buff - Buffer to be submitted. NULL to unlink the buffer.
- * @param size - Size of the submitted buffer
- * @return
- *  - \ref SUCCESS : On success
- *  - \ref FAILURE : Otherwise
- */
-int32_t at_submit_buffer(struct at_desc *desc, uint32_t conn_id,
-			 uint8_t *buff, uint32_t size)
-{
-	volatile struct at_circular_buff *cbuff;
-
-	if (!desc || conn_id >= MAX_CONNECTIONS)
-		return FAILURE;
-
-	cbuff = &desc->conn[conn_id].cbuff;
-	cbuff->buff = buff;
-	cbuff->size = size;
-	cbuff->ri = 0;
-	cbuff->wi = 0;
-	cbuff->is_overflow = false;
-
-	return SUCCESS;
-}
-
-/**
- * @brief Read data received from a connection
- * @param desc - AT parser reference
- * @param conn_id - Connection id
- * @param buff - Buffer where to read the data
- * @param to_read - Maximum bytes to read.
- * @param is_blocking - If true, the call will block until to_read bytes have
- * been read. Will return immediately otherwise.
- * @return Number of bytes that have been read or negative error code otherwise
- */
-int32_t at_read_buffer(struct at_desc *desc, uint32_t conn_id, uint8_t *buff,
-		       int32_t to_read, bool is_blocking)
-{
-	volatile struct at_circular_buff	*cb;
-	int32_t					ret;
-	uint32_t				len;
-	uint32_t				buff_idx;
-	bool					wait_new_data;
-
-	if (!desc || conn_id >= MAX_CONNECTIONS)
-		return FAILURE;
-
-	cb = &desc->conn[conn_id].cbuff;
-
-	if (!is_blocking)
-		to_read = min(to_read, cb->count);
-	if (to_read == 0)
-		goto end;
-
-	/* Blocking read or until error */
-	buff_idx = 0;
-	wait_new_data = false;
-	do {
-		if (wait_new_data) {
-			/* Errors can be updated from the interrupt */
-			while (!cb->new_data) {
-				if (cb->is_overflow)
-					desc->errors |=
-						AT_ERROR_CONN_BUFFER_OVERRUN;
-				if (!desc->conn[conn_id].active)
-					desc->errors |=
-						AT_ERROR_CONNECTION_LOST;
-				if (desc->errors)
-					goto end;
-				/* If no errors */
-				/* Do nothing until new data */
-			}
-			cb->new_data = false;
-			wait_new_data = false;
-		}
-
-		/* Copy data from circular buffer to user buffer */
-		len = min(cb->size - cb->ri, to_read);
-		if (len > cb->count) {
-			wait_new_data = true;
-			len = cb->count;
-		}
-		if (len) {
-			memcpy(buff + buff_idx, cb->buff + cb->ri, len);
-			if (cb->ri + len == cb->size)
-				cb->ri = 0;
-			else
-				cb->ri += len;
-			cb->count -= len;
-			buff_idx += len;
-		}
-	} while (buff_idx < to_read);
-
-end:
-	if (desc->errors) {
-		ret = desc->errors;
-		desc->errors = 0;
-		return -ret;
-	}
-
-	if (to_read == 0)
-		return -EAGAIN;
-
-	return to_read;
-}
-
-/**
  * @brief Initialize the AT parser
  * @param desc - Address where to store the AT parser reference used by the
  * driver functions.
@@ -1013,12 +904,15 @@ int32_t at_init(struct at_desc **desc, const struct at_init_param *param)
 	uint32_t		conn;
 	uint8_t			*str;
 
-	if (!desc || !param)
+	if (!desc || !param || !param->connection_callback)
 		return FAILURE;
 
 	ldesc = calloc(1, sizeof(*ldesc));
 	if (!ldesc)
 		return FAILURE;
+
+	ldesc->connection_callback = param->connection_callback;
+	ldesc->callback_ctx = param->callback_ctx;
 
 	ldesc->uart_desc = param->uart_desc;
 	ldesc->irq_desc = param->irq_desc;
