@@ -572,3 +572,25 @@ static int32_t wifi_socket_recvfrom(struct wifi_desc *desc, uint32_t sock_id,
 	/* TODO: Implement for UDP */
 	return FAILURE;
 }
+
+
+/** @brief See \ref network_interface.socket_bind */
+static int32_t wifi_socket_bind(struct wifi_desc *desc, uint32_t sock_id,
+				uint16_t port)
+{
+	return -1;
+}
+
+/** @brief See \ref network_interface.socket_listen */
+static int32_t wifi_socket_listen(struct wifi_desc *desc, uint32_t sock_id,
+				  uint32_t back_log)
+{
+	return -1;
+}
+
+/** @brief See \ref network_interface.socket_accept */
+static int32_t wifi_socket_accept(struct wifi_desc *desc, uint32_t sock_id,
+				  uint32_t *client_socket_id)
+{
+	return -1;
+}
