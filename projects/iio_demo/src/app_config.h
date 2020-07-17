@@ -42,5 +42,6 @@
 //#define XILINX_PLATFORM
 //#define ALTERA_PLATFORM
 //#define ADUCM_PLATFORM
+//#define USE_TCP_SOCKET
 
 #endif
