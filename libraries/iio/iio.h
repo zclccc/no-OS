@@ -45,6 +45,8 @@
 /******************************************************************************/
 
 #include "iio_types.h"
+#include "uart.h"
+#include "tcp_socket.h"
 
 /******************************************************************************/
 /*************************** Types Declarations *******************************/
@@ -89,11 +91,10 @@ struct iio_desc;
 
 struct iio_init_param {
 	enum pysical_link_type	phy_type;
-	/*
-	 * struct uart_init_parma *init_param or
-	 * when implemented: struct tcp_socket_init_param *tcp_socket_init_param
-	 */
-	void			*phy_init_param;
+	union {
+		struct uart_init_param		*uart_init_param;
+		struct tcp_socket_init_param	*tcp_socket_init_param;
+	};
 };
 
 /******************************************************************************/
