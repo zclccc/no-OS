@@ -11,7 +11,11 @@
 
 # Uncomment to select the profile
 
-SRCS := $(PROJECT)/src/app/ad9656_fmc.c					
+SRCS := $(PROJECT)/src/app/ad9656_fmc.c                                 \
+	$(PROJECT)/src/app/ad9508.c   					\
+	$(PROJECT)/src/app/ad9508.h					\
+	$(PROJECT)/src/app/ad9553.c					\
+	$(PROJECT)/src/app/ad9553.h					
 SRCS += $(DRIVERS)/axi_core/axi_adc_core/axi_adc_core.c			\
 	$(DRIVERS)/axi_core/axi_dmac/axi_dmac.c				\
 	$(DRIVERS)/axi_core/clk_axi_clkgen/clk_axi_clkgen.c		\

@@ -40,7 +40,6 @@
 #ifndef _PARAMETERS_H_
 #define _PARAMETERS_H_
 
-#include "app_config.h"
 #include "xparameters.h"
 
 #define SPI_DEVICE_ID				XPAR_XSPIPS_0_DEVICE_ID
